@@ -1153,6 +1153,15 @@ def handler(job):
         except Exception as e:
             return {"error": f"Falha ao obter object_info: {e}"}
 
+    # Diagnóstico: tail do log de startup do ComfyUI (achar import falho de custom node).
+    if job_input.get("logtail"):
+        tail = _read_comfy_log_tail(max_lines=600)
+        needle = job_input.get("logtail")
+        if isinstance(needle, str) and needle not in ("1", "true", "all"):
+            low = needle.lower()
+            tail = [ln for ln in tail if low in ln.lower()]
+        return {"logtail": tail[-200:]}
+
     validated_data, error_message = validate_input(job_input)
     if error_message:
         diagnostics = _build_runtime_diagnostics(error_message)
