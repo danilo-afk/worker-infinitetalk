@@ -1,0 +1,19 @@
+services:
+  ltx-video-worker:
+    image: kiara/worker-ltx-video:dev
+    pull_policy: never
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - SERVE_API_LOCALLY=true
+    ports:
+      - "8000:8000"
+      - "8188:8188"
+    volumes:
+      - ./data/comfyui/output:/comfyui/output
+      - ./data/runpod-volume:/runpod-volume

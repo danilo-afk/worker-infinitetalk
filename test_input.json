@@ -1,0 +1,82 @@
+{
+  "input": {
+    "workflow": {
+      "1": {
+        "class_type": "CheckpointLoaderSimple",
+        "inputs": {
+          "ckpt_name": "ltx-2-19b-dev-fp8.safetensors"
+        }
+      },
+      "2": {
+        "class_type": "LTXVGemmaCLIPModelLoader",
+        "inputs": {
+          "gemma_path": "gemma_3_12B_it_fp8_e4m3fn.safetensors",
+          "ltxv_path": "ltx-2-19b-dev-fp8.safetensors",
+          "max_length": 512
+        }
+      },
+      "3": {
+        "class_type": "CLIPTextEncode",
+        "inputs": {
+          "text": "A cinematic shot of a golden retriever running through a sunflower field at sunset, slow motion, 4K quality",
+          "clip": ["2", 0]
+        }
+      },
+      "4": {
+        "class_type": "CLIPTextEncode",
+        "inputs": {
+          "text": "blurry, low quality, distorted",
+          "clip": ["2", 0]
+        }
+      },
+      "5": {
+        "class_type": "LTXVConditioning",
+        "inputs": {
+          "positive": ["3", 0],
+          "negative": ["4", 0],
+          "frame_rate": 24
+        }
+      },
+      "6": {
+        "class_type": "EmptyLTXVLatentVideo",
+        "inputs": {
+          "width": 768,
+          "height": 512,
+          "length": 97,
+          "batch_size": 1
+        }
+      },
+      "7": {
+        "class_type": "KSampler",
+        "inputs": {
+          "model": ["1", 0],
+          "positive": ["5", 0],
+          "negative": ["5", 1],
+          "latent_image": ["6", 0],
+          "seed": 42,
+          "steps": 30,
+          "cfg": 3.5,
+          "sampler_name": "euler",
+          "scheduler": "normal",
+          "denoise": 1.0
+        }
+      },
+      "8": {
+        "class_type": "VAEDecode",
+        "inputs": {
+          "samples": ["7", 0],
+          "vae": ["1", 2]
+        }
+      },
+      "9": {
+        "class_type": "VHS_VideoCombine",
+        "inputs": {
+          "images": ["8", 0],
+          "frame_rate": 24,
+          "format": "video/h264-mp4",
+          "filename_prefix": "ltx_video"
+        }
+      }
+    }
+  }
+}
