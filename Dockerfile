@@ -98,22 +98,26 @@ RUN chmod +x /usr/local/bin/comfy-manager-set-mode
 
 # WanVideoWrapper (fork de kijai) — Wan2.x + InfiniteTalk/MultiTalk (áudio->vídeo),
 # Whisper/Wav2Vec embeds, MelBandRoformer. É o node principal do talking-avatar.
+# IMPORTANTE: usar /opt/venv/bin/pip (NÃO `uv pip`): rodando de dentro de
+# /comfyui/custom_nodes/<fork>, o `uv` descobre o .venv que o comfy-cli criou em
+# /comfyui e instala LÁ, não em /opt/venv (onde o ComfyUI roda) → deps do fork
+# (accelerate, cv2, imageio-ffmpeg) somem no runtime = IMPORT FAILED.
 RUN cd /comfyui/custom_nodes && \
     git clone https://github.com/danilo-afk/ComfyUI-WanVideoWrapper.git && \
     cd ComfyUI-WanVideoWrapper && git checkout 088128b224242e110d3906c6750e9a3a348a659b && \
-    uv pip install --no-cache-dir -r requirements.txt
+    /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 # KJNodes (fork de kijai) — utilitários usados pelos workflows do WanVideoWrapper
 RUN cd /comfyui/custom_nodes && \
     git clone https://github.com/danilo-afk/ComfyUI-KJNodes.git && \
     cd ComfyUI-KJNodes && git checkout e27a505b3ba6ce42687fe00500deda103d9d6071 && \
-    uv pip install --no-cache-dir -r requirements.txt
+    /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 # VideoHelperSuite (fork de Kosinkadink) — output de vídeo (VHS_VideoCombine) + LoadAudio
 RUN cd /comfyui/custom_nodes && \
     git clone https://github.com/danilo-afk/ComfyUI-VideoHelperSuite.git && \
     cd ComfyUI-VideoHelperSuite && git checkout 4ee72c065db22c9d96c2427954dc69e7b908444b && \
-    uv pip install --no-cache-dir -r requirements.txt
+    /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 # ==========================================
 
 CMD ["/start.sh"]
