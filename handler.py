@@ -886,8 +886,18 @@ def validate_input(job_input):
         ):
             return None, "'images' must be a list of objects with 'name' and 'image' keys"
 
+    # Áudio p/ talking-avatar (InfiniteTalk): lista [{name, audio(base64)}] ou single.
+    audio = job_input.get("audio")
+    if audio is not None:
+        if isinstance(audio, dict):
+            audio = [audio]
+        if not isinstance(audio, list) or not all(
+            isinstance(a, dict) and "name" in a and "audio" in a for a in audio
+        ):
+            return None, "'audio' must be a list of objects with 'name' and 'audio' keys"
+
     comfy_org_api_key = job_input.get("comfy_org_api_key")
-    return {"workflow": workflow, "images": images, "comfy_org_api_key": comfy_org_api_key}, None
+    return {"workflow": workflow, "images": images, "audio": audio, "comfy_org_api_key": comfy_org_api_key}, None
 
 
 def check_server(url, retries=500, delay=50):
@@ -1016,6 +1026,39 @@ def upload_images(images):
     return {"status": "success", "message": "Todas as imagens enviadas", "details": responses}
 
 
+def upload_audio(audio_files):
+    """Grava áudios decodificados em /comfyui/input (LoadAudio lê de lá)."""
+    if not audio_files:
+        return {"status": "success", "message": "No audio to upload", "details": []}
+
+    responses = []
+    upload_errors = []
+    input_dir = "/comfyui/input"
+    os.makedirs(input_dir, exist_ok=True)
+    print(f"worker-infinitetalk - Uploading {len(audio_files)} áudio(s)...")
+
+    for item in audio_files:
+        try:
+            name = item["name"]
+            data_uri = item["audio"]
+            base64_data = data_uri.split(",", 1)[1].strip() if "," in data_uri else data_uri.strip()
+            blob = base64.b64decode(base64_data)
+            dst_path = os.path.join(input_dir, name)
+            with open(dst_path, "wb") as fh:
+                fh.write(blob)
+            size = os.path.getsize(dst_path)
+            print(f"worker-infinitetalk - Áudio salvo: {name} ({size} bytes)")
+            responses.append(f"Saved OK: {name} ({size} bytes)")
+        except Exception as e:
+            msg = f"Erro no upload de áudio {item.get('name', '?')}: {e}"
+            print(f"worker-infinitetalk - {msg}")
+            upload_errors.append(msg)
+
+    if upload_errors:
+        return {"status": "error", "message": "Algum áudio falhou", "details": upload_errors}
+    return {"status": "success", "message": "Áudios enviados", "details": responses}
+
+
 def queue_workflow(workflow, client_id, comfy_org_api_key=None):
     """Enfileira workflow no ComfyUI."""
     payload = {"prompt": workflow, "client_id": client_id}
@@ -1090,6 +1133,26 @@ def handler(job):
     job_input = job["input"]
     job_id = job["id"]
 
+    # Introspection: devolve o /object_info do ComfyUI (schemas exatos dos nodes).
+    # Usado p/ converter workflow UI->API sem adivinhar ordem de widgets.
+    if job_input.get("object_info"):
+        if not check_server(
+            f"http://{COMFY_HOST}/",
+            COMFY_API_AVAILABLE_MAX_RETRIES,
+            COMFY_API_AVAILABLE_INTERVAL_MS,
+        ):
+            return {"error": "ComfyUI inacessível para object_info"}
+        try:
+            only = job_input.get("object_info")
+            url = f"http://{COMFY_HOST}/object_info"
+            if isinstance(only, str) and only not in ("1", "true", "all"):
+                url = f"{url}/{urllib.parse.quote(only)}"
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            return {"object_info": resp.json()}
+        except Exception as e:
+            return {"error": f"Falha ao obter object_info: {e}"}
+
     validated_data, error_message = validate_input(job_input)
     if error_message:
         diagnostics = _build_runtime_diagnostics(error_message)
@@ -1099,6 +1162,7 @@ def handler(job):
 
     workflow = validated_data["workflow"]
     input_images = validated_data.get("images")
+    input_audio = validated_data.get("audio")
     _log_job_diagnostics(job_id, job_input, workflow, input_images)
 
     if not check_server(
@@ -1147,6 +1211,14 @@ def handler(job):
                     "details": invalid_checks,
                     "diagnostics": diagnostics,
                 }
+
+    if input_audio:
+        audio_result = upload_audio(input_audio)
+        if audio_result["status"] == "error":
+            return {
+                "error": "Falha no upload de áudio",
+                "details": audio_result["details"],
+            }
 
     gemma_preflight = _preflight_gemma_loader(workflow)
     if gemma_preflight:
