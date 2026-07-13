@@ -1,0 +1,15 @@
+{
+  "title": "InfiniteTalk Avatar (worker-infinitetalk)",
+  "description": "Vídeo dirigido por áudio (avatar falante / lip-sync) com InfiniteTalk sobre Wan2.1-I2V-14B (ComfyUI + WanVideoWrapper) em RunPod Serverless. Pesos não-gated no network volume.",
+  "type": "serverless",
+  "category": "video",
+  "config": {
+    "runsOn": "GPU",
+    "cudaVersion": "12.6",
+    "allowedCudaVersions": ["12.9", "12.8", "12.7", "12.6"],
+    "gpuCount": 1,
+    "gpuIds": "ADA_24,AMPERE_48,ADA_48_PRO,AMPERE_80",
+    "containerDiskInGb": 30,
+    "env": []
+  }
+}
