@@ -99,6 +99,20 @@ def _get_idle_timeout_for_node_class(node_class):
         return CHECKPOINT_NODE_IDLE_TIMEOUT_S
     if node_class == "SamplerCustomAdvanced":
         return SAMPLER_NODE_IDLE_TIMEOUT_S
+    # InfiniteTalk (WanVideoWrapper): sampler + loaders/encoders pesados (Q8 dequant,
+    # block-swap CPU<->GPU, wav2vec download) ficam longos sem eventos de websocket.
+    if node_class in (
+        "WanVideoSampler",
+        "WanVideoModelLoader",
+        "MultiTalkModelLoader",
+        "DownloadAndLoadWav2VecModel",
+        "Wav2VecModelLoader",
+        "WanVideoTextEncodeCached",
+        "WanVideoVAELoader",
+        "WanVideoImageToVideoMultiTalk",
+        "MultiTalkWav2VecEmbeds",
+    ):
+        return SAMPLER_NODE_IDLE_TIMEOUT_S
     # LTX-2 usa LTXVSpatioTemporalTiledVAEDecode; LTX-2.3 usa LTXVTiledVAEDecode/LTXVAudioVAEDecode.
     if node_class in (
         "LTXVSpatioTemporalTiledVAEDecode",
