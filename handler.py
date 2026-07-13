@@ -1154,6 +1154,29 @@ def handler(job):
     job_input = job["input"]
     job_id = job["id"]
 
+    # Diagnóstico: reproduz o import de um custom node num subprocess e captura a exceção
+    # EXATA (o /object_info só diz "ausente"; o log de startup é dessincronizado). Uso:
+    # {"input":{"import_probe":"ComfyUI-WanVideoWrapper"}}  (nome da pasta em custom_nodes)
+    if job_input.get("import_probe"):
+        import subprocess as _sp
+        pkg = job_input.get("import_probe")
+        code = (
+            "import sys, traceback, importlib\n"
+            "sys.path.insert(0, '/comfyui')\n"
+            "sys.path.insert(0, '/comfyui/custom_nodes')\n"
+            "try:\n"
+            "    importlib.import_module(%r)\n"
+            "    print('IMPORT_OK')\n"
+            "except Exception:\n"
+            "    traceback.print_exc()\n"
+        ) % pkg
+        try:
+            r = _sp.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=180)
+            out = (r.stdout or "") + (r.stderr or "")
+        except Exception as e:
+            out = f"(falha ao rodar probe: {e})"
+        return {"import_probe": pkg, "result": out[-6000:]}
+
     # Introspection: devolve o /object_info do ComfyUI (schemas exatos dos nodes).
     # Usado p/ converter workflow UI->API sem adivinhar ordem de widgets.
     if job_input.get("object_info"):
