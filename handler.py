@@ -499,15 +499,26 @@ def convert_video_to_mp4(video_bytes, filename):
                 os.remove(p)
 
 
+_MIME_BY_EXT = {".mp4": "video/mp4", ".webm": "video/webm", ".gif": "image/gif",
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+
+
 def upload_binary_artifact(job_id, payload_bytes, filename, default_ext):
-    """Upload de artefato binário e retorna URL pública."""
+    """Upload de artefato binário e retorna URL pública. Sem bucket S3 configurado
+    (rp_upload devolve 'simulated_uploaded/...'), cai em base64 data URI — o
+    platform_k aceita URL http OU data URI, então o worker fica autossuficiente."""
     tmp_path = None
     try:
         file_ext = os.path.splitext(filename)[1] or default_ext
         with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as tmp:
             tmp.write(payload_bytes)
             tmp_path = tmp.name
-        return rp_upload.upload_image(job_id, tmp_path)
+        url = rp_upload.upload_image(job_id, tmp_path)
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
+            return url
+        # fallback base64 (sem S3): data URI que o platform_k baixa/decodifica
+        mime = _MIME_BY_EXT.get(file_ext.lower(), "application/octet-stream")
+        return f"data:{mime};base64," + base64.b64encode(payload_bytes).decode()
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
@@ -548,7 +559,15 @@ _TEMPLATE_INJECT = {
     # (até 4) + 1 background; PromptRelayEncode conduz o prompt; dims em INTConstant.
     "msr": {"file": "ltx23_msr.json", "prompt_relay": "99", "subjects": ["29", "40"], "background": "30",
             "width": "43", "height": "44", "length": "50", "fps": 30},
+    # Talking-avatar (InfiniteTalk): imagem (retrato) + áudio (fala) -> vídeo falante.
+    # positive/negative usam o campo `positive_prompt`/`negative_prompt` (WanVideoTextEncodeCached).
+    "talking_avatar": {"file": "talking_avatar.json", "load_image": "1", "load_audio": "7",
+                       "positive": "14", "negative": "14", "length": "9", "fps": 25, "resize": "2"},
 }
+
+# Teto de frames do talking-avatar (24GB + block-swap; ~5s @ 25fps). InfiniteTalk faz
+# janelas de frame_window_size=81; caps maiores = mais VRAM/tempo.
+_TALKING_MAX_FRAMES = 121
 
 # aspect_ratio (node) -> (W, H) na mesma classe de área (~921k px), múltiplos de 32.
 # t2v: seta o EmptyImage (fonte de resolução). i2v: redimensiona a imagem de entrada
@@ -775,6 +794,44 @@ def _build_msr(job_input, inj, images, prompt):
     return wf, upload
 
 
+def _build_talking_avatar(job_input, inj, images, prompt):
+    """Talking-avatar (InfiniteTalk): injeta imagem (retrato), áudio (fala), prompt e
+    duração no template. Retorna (workflow, images) — o áudio sobe pelo fluxo próprio."""
+    path = os.path.join(WORKFLOWS_DIR, inj["file"])
+    with open(path) as f:
+        wf = json.load(f)
+    if images and inj["load_image"] in wf:
+        wf[inj["load_image"]]["inputs"]["image"] = images[0]["name"]
+    audio = job_input.get("audio")
+    if isinstance(audio, dict):
+        audio = [audio]
+    if audio and inj["load_audio"] in wf:
+        wf[inj["load_audio"]]["inputs"]["audio"] = audio[0]["name"]
+    if prompt and inj["positive"] in wf:
+        wf[inj["positive"]]["inputs"]["positive_prompt"] = prompt
+    neg = job_input.get("negative_prompt")
+    if neg and inj["negative"] in wf:
+        wf[inj["negative"]]["inputs"]["negative_prompt"] = neg
+    # duração -> num_frames (25fps), com teto de VRAM/tempo.
+    fps = inj.get("fps") or 25
+    frames = None
+    if job_input.get("num_frames"):
+        frames = int(job_input["num_frames"])
+    elif job_input.get("duration") or job_input.get("duration_seconds"):
+        frames = round(float(job_input.get("duration") or job_input.get("duration_seconds")) * fps)
+    if frames and inj["length"] in wf:
+        frames = max(25, min(frames, _TALKING_MAX_FRAMES))
+        wf[inj["length"]]["inputs"]["num_frames"] = frames
+        print(f"worker-ltx-video - talking_avatar: num_frames={frames} (~{frames/fps:.1f}s @ {fps}fps)")
+    # aspect_ratio -> dims do resize (default 832x480 no template).
+    aspect = (job_input.get("aspect_ratio") or "").strip()
+    wh = _ASPECT_WH.get(aspect)
+    if wh and inj.get("resize") in wf:
+        wf[inj["resize"]]["inputs"]["width"], wf[inj["resize"]]["inputs"]["height"] = wh
+    print(f"worker-ltx-video - modo-prompt: talking_avatar | img={bool(images)} | prompt={prompt[:60]!r}")
+    return wf, images
+
+
 def build_workflow_from_prompt(job_input):
     """Modo-prompt: monta o workflow LTX a partir de {prompt, images/image_urls, params}.
 
@@ -793,6 +850,10 @@ def build_workflow_from_prompt(job_input):
         if not u:
             continue
         images.append({"name": f"ref_{i}.png", "image": _url_to_data_uri(u)})
+
+    # Talking-avatar (InfiniteTalk): áudio presente -> vídeo falante (imagem + fala).
+    if job_input.get("audio"):
+        return _build_talking_avatar(job_input, _TEMPLATE_INJECT["talking_avatar"], images, prompt)
 
     # Modo: `content_reference` (image_as_reference no node) + imagens -> IC-LoRA
     # (referência de conteúdo por FOLHA composta). Senão: 1+ img = i2v, 0 = t2v.
