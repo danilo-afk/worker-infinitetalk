@@ -224,6 +224,27 @@ def _read_comfy_log_tail(max_lines=120):
         return [f"(falha ao ler log de startup: {exc})"]
 
 
+def _grep_comfy_log(needle, context=6, max_hits=40):
+    """Grep no arquivo INTEIRO de startup (não só tail): retorna linhas que casam
+    o needle + `context` linhas ao redor (p/ pegar traceback de import de custom node)."""
+    if not COMFY_STARTUP_LOG or not os.path.exists(COMFY_STARTUP_LOG):
+        return []
+    try:
+        with open(COMFY_STARTUP_LOG, "r", encoding="utf-8", errors="replace") as fh:
+            lines = [ln.rstrip("\n") for ln in fh.readlines()]
+    except Exception as exc:
+        return [f"(falha ao ler log: {exc})"]
+    low = needle.lower()
+    picked = set()
+    for i, ln in enumerate(lines):
+        if low in ln.lower():
+            for j in range(max(0, i - context), min(len(lines), i + context + 1)):
+                picked.add(j)
+            if len(picked) > max_hits * (context * 2 + 1):
+                break
+    return [lines[i] for i in sorted(picked)]
+
+
 def _extract_loadimage_nodes(workflow):
     """Retorna lista de nós LoadImage com nome esperado do arquivo."""
     load_nodes = []
@@ -1153,14 +1174,20 @@ def handler(job):
         except Exception as e:
             return {"error": f"Falha ao obter object_info: {e}"}
 
-    # Diagnóstico: tail do log de startup do ComfyUI (achar import falho de custom node).
+    # Diagnóstico: log de startup do ComfyUI (achar import falho de custom node).
+    # Espera o ComfyUI subir (check_server) p/ garantir que os imports já foram logados,
+    # e grepa o ARQUIVO INTEIRO com contexto (não só o tail) quando há needle.
     if job_input.get("logtail"):
-        tail = _read_comfy_log_tail(max_lines=600)
+        check_server(
+            f"http://{COMFY_HOST}/",
+            COMFY_API_AVAILABLE_MAX_RETRIES,
+            COMFY_API_AVAILABLE_INTERVAL_MS,
+        )
         needle = job_input.get("logtail")
         if isinstance(needle, str) and needle not in ("1", "true", "all"):
-            low = needle.lower()
-            tail = [ln for ln in tail if low in ln.lower()]
-        return {"logtail": tail[-200:]}
+            hits = _grep_comfy_log(needle)
+            return {"logtail": hits[-300:]}
+        return {"logtail": _read_comfy_log_tail(max_lines=600)[-250:]}
 
     validated_data, error_message = validate_input(job_input)
     if error_message:
