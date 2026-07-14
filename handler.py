@@ -1032,6 +1032,11 @@ def _build_ta_infinitetalk(job_input, images, prompt):
         quant = job_input.get("quantization") or "fp8_e4m3fn_fast"   # matmul fp8 (Ada ≥8.9)
     aspect = (job_input.get("aspect_ratio") or "9:16").strip()
     w, h = {"9:16": (480, 832), "16:9": (832, 480), "1:1": (640, 640)}.get(aspect, (480, 832))
+    # Resolução ajustável (múltiplos de 16). Custo/step ~proporcional aos pixels →
+    # baixar a resolução é a alavanca ROBUSTA de velocidade (independe da GPU). Ex.: 384x672.
+    if job_input.get("width") and job_input.get("height"):
+        w = (int(job_input["width"]) // 16) * 16
+        h = (int(job_input["height"]) // 16) * 16
 
     g = {}
     g["img"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
