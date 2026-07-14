@@ -889,8 +889,11 @@ def _build_ta_longcat(job_input, images, prompt):
     quant = job_input.get("quantization") or "disabled"   # ex.: fp8_e4m3fn_scaled (Ada)
     compile_on = bool(job_input.get("compile"))            # OFF por padrão: compile é net-negativo p/ job único
     aspect = (job_input.get("aspect_ratio") or "9:16").strip()
-    # Resolução NATIVA do LongCat/Wan 480p. 9:16 retrato = melhor enquadramento p/ avatar.
-    w, h = {"9:16": (480, 832), "16:9": (832, 480), "1:1": (640, 640)}.get(aspect, (480, 832))
+    # Curto = LongCat prioriza QUALIDADE → 720p (>480×832). 1 janela absorve o custo maior.
+    w, h = {"9:16": (720, 1280), "16:9": (1280, 720), "1:1": (960, 960)}.get(aspect, (720, 1280))
+    if job_input.get("width") and job_input.get("height"):
+        w = (int(job_input["width"]) // 16) * 16
+        h = (int(job_input["height"]) // 16) * 16
 
     g = {}
     g["img"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
