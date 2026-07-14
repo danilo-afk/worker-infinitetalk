@@ -894,7 +894,10 @@ def _build_talking_avatar(job_input, inj, images, prompt):
     g["embeds"] = {"class_type": "LongCatAvatarWhisperEmbeds", "inputs": {"whisper_model": ["whisper", 0],
         "audio_1": ["aud", 0], "normalize_loudness": True, "num_frames": total, "fps": fps,
         "audio_scale": 1, "audio_cfg_scale": 1, "multi_audio_type": "para"}}
-    g["blockswap"] = {"class_type": "WanVideoBlockSwap", "inputs": {"blocks_to_swap": 25, "offload_img_emb": False,
+    # 48GB: block_swap baixo = modelo residente na VRAM = sampler rápido (skill: 10).
+    # Ajustável por /run p/ achar o ponto sem OOM de VRAM no latente longo, sem rebuild.
+    blocks = int(job_input.get("blocks_to_swap") or 10)
+    g["blockswap"] = {"class_type": "WanVideoBlockSwap", "inputs": {"blocks_to_swap": blocks, "offload_img_emb": False,
         "offload_txt_emb": False, "use_non_blocking": False, "vace_blocks_to_swap": 0, "prefetch_blocks": 1,
         "block_swap_debug": False}}
     g["lora"] = {"class_type": "WanVideoLoraSelect", "inputs": {"lora": "LongCat/LongCat-Avatar-15_dmd_distill_lora_rank128_bf16.safetensors",
