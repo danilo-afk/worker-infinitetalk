@@ -4,6 +4,7 @@ import json
 import urllib.request
 import urllib.parse
 import time
+import math
 import os
 import requests
 import base64
@@ -584,7 +585,7 @@ _TEMPLATE_INJECT = {
 
 # Teto de frames do talking-avatar (24GB + block-swap; ~5s @ 25fps). InfiniteTalk faz
 # janelas de frame_window_size=81; caps maiores = mais VRAM/tempo.
-_TALKING_MAX_FRAMES = 121
+_TALKING_MAX_FRAMES = 373  # ~15s @ 25fps (LongCat multi-segmento; ~5 segmentos)
 
 # aspect_ratio (node) -> (W, H) na mesma classe de área (~921k px), múltiplos de 32.
 # t2v: seta o EmptyImage (fonte de resolução). i2v: redimensiona a imagem de entrada
@@ -811,45 +812,115 @@ def _build_msr(job_input, inj, images, prompt):
     return wf, upload
 
 
+# --- LongCat-Avatar-1.5: builder DINÂMICO multi-segmento (vídeo longo) ---------------
+_LC_WINDOW = 93   # frames por segmento (LongCat)
+_LC_OVERLAP = 13  # frames de sobreposição entre segmentos (continuidade)
+_LC_NEG = ("bright tones, overexposed, static, blurred details, subtitles, worst quality, "
+           "low quality, deformed, disfigured, extra fingers")
+_LC_VAE = {"enable_vae_tiling": False, "tile_x": 272, "tile_y": 272,
+           "tile_stride_x": 144, "tile_stride_y": 128}
+
+
+def _lc_segments(total):
+    if total <= _LC_WINDOW:
+        return 1
+    return math.ceil((total - _LC_WINDOW) / (_LC_WINDOW - _LC_OVERLAP)) + 1
+
+
 def _build_talking_avatar(job_input, inj, images, prompt):
-    """Talking-avatar (InfiniteTalk): injeta imagem (retrato), áudio (fala), prompt e
-    duração no template. Retorna (workflow, images) — o áudio sobe pelo fluxo próprio."""
-    path = os.path.join(WORKFLOWS_DIR, inj["file"])
-    with open(path) as f:
-        wf = json.load(f)
-    if images and inj["load_image"] in wf:
-        wf[inj["load_image"]]["inputs"]["image"] = images[0]["name"]
+    """Talking-avatar (LongCat-Avatar-1.5): monta um grafo N-segmentos ENCADEADO
+    (vídeo longo) a partir de {imagem, áudio, prompt, duração}. Cada segmento adiciona
+    (_LC_WINDOW-_LC_OVERLAP) frames, continuando do latente anterior + ref_latent (face)
+    p/ consistência. Áudio consumido por janela via frames_processed. Retorna (grafo, images)."""
+    image_name = images[0]["name"] if images else "example.png"
     audio = job_input.get("audio")
     if isinstance(audio, dict):
         audio = [audio]
-    if audio and inj["load_audio"] in wf:
-        wf[inj["load_audio"]]["inputs"]["audio"] = audio[0]["name"]
-    if prompt and inj["positive"] in wf:
-        wf[inj["positive"]]["inputs"]["positive_prompt"] = prompt
-    neg = job_input.get("negative_prompt")
-    if neg and inj["negative"] in wf:
-        wf[inj["negative"]]["inputs"]["negative_prompt"] = neg
-    # duração -> num_frames (25fps), com teto de VRAM/tempo.
-    fps = inj.get("fps") or 25
-    frames = None
+    audio_name = audio[0]["name"] if audio else "audio.wav"
+    neg = job_input.get("negative_prompt") or _LC_NEG
+    fps = 25  # LongCat-Avatar-1.5 é treinado a 25fps
+    total = None
     if job_input.get("num_frames"):
-        frames = int(job_input["num_frames"])
+        total = int(job_input["num_frames"])
     elif job_input.get("duration") or job_input.get("duration_seconds"):
-        frames = round(float(job_input.get("duration") or job_input.get("duration_seconds")) * fps)
-    if frames:
-        frames = max(25, min(frames, _TALKING_MAX_FRAMES))
-        for _k in ("length", "length2"):
-            _nid = inj.get(_k)
-            if _nid and _nid in wf:
-                wf[_nid]["inputs"]["num_frames"] = frames
-        print(f"worker-ltx-video - talking_avatar: num_frames={frames} (~{frames/fps:.1f}s @ {fps}fps)")
-    # aspect_ratio -> dims do resize (default 832x480 no template).
-    aspect = (job_input.get("aspect_ratio") or "").strip()
-    wh = _ASPECT_WH.get(aspect)
-    if wh and inj.get("resize") in wf:
-        wf[inj["resize"]]["inputs"]["width"], wf[inj["resize"]]["inputs"]["height"] = wh
-    print(f"worker-ltx-video - modo-prompt: talking_avatar | img={bool(images)} | prompt={prompt[:60]!r}")
-    return wf, images
+        total = round(float(job_input.get("duration") or job_input.get("duration_seconds")) * fps)
+    total = max(_LC_WINDOW, min(total or _LC_WINDOW, _TALKING_MAX_FRAMES))
+    N = _lc_segments(total)
+    aspect = (job_input.get("aspect_ratio") or "9:16").strip()
+    w, h = _ASPECT_WH.get(aspect, (480, 832))
+
+    g = {}
+    g["img"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
+    g["resize"] = {"class_type": "ImageResizeKJv2", "inputs": {"image": ["img", 0], "width": w,
+        "height": h, "upscale_method": "lanczos", "keep_proportion": "crop", "pad_color": "0, 0, 0",
+        "crop_position": "center", "divisible_by": 16, "device": "cpu"}}
+    g["vae"] = {"class_type": "WanVideoVAELoader", "inputs": {"model_name": "wanvideo/Wan2_1_VAE_bf16.safetensors",
+        "precision": "bf16", "use_cpu_cache": False, "verbose": False}}
+    g["enc_init"] = {"class_type": "WanVideoEncode", "inputs": {"vae": ["vae", 0], "image": ["resize", 0],
+        "noise_aug_strength": 0, "latent_strength": 1, **_LC_VAE}}
+    g["aud"] = {"class_type": "LoadAudio", "inputs": {"audio": audio_name}}
+    g["whisper"] = {"class_type": "WhisperModelLoader", "inputs": {"model": "whisper_large_v3_encoder_fp16.safetensors",
+        "base_precision": "fp16", "load_device": "main_device"}}
+    g["embeds"] = {"class_type": "LongCatAvatarWhisperEmbeds", "inputs": {"whisper_model": ["whisper", 0],
+        "audio_1": ["aud", 0], "normalize_loudness": True, "num_frames": total, "fps": fps,
+        "audio_scale": 1, "audio_cfg_scale": 1, "multi_audio_type": "para"}}
+    g["blockswap"] = {"class_type": "WanVideoBlockSwap", "inputs": {"blocks_to_swap": 25, "offload_img_emb": False,
+        "offload_txt_emb": False, "use_non_blocking": False, "vace_blocks_to_swap": 0, "prefetch_blocks": 1,
+        "block_swap_debug": False}}
+    g["lora"] = {"class_type": "WanVideoLoraSelect", "inputs": {"lora": "LongCat/LongCat-Avatar-15_dmd_distill_lora_rank128_bf16.safetensors",
+        "strength": 0.9, "low_mem_load": False, "merge_loras": False}}
+    g["model"] = {"class_type": "WanVideoModelLoader", "inputs": {"model": "LongCat/LongCat-Avatar-15_bf16.safetensors",
+        "base_precision": "bf16", "quantization": "disabled", "load_device": "offload_device",
+        "attention_mode": "sdpa", "block_swap_args": ["blockswap", 0], "lora": ["lora", 0]}}
+    g["text"] = {"class_type": "WanVideoTextEncodeCached", "inputs": {"model_name": "umt5-xxl-enc-bf16.safetensors",
+        "precision": "bf16", "positive_prompt": prompt or "a person talking, natural expression",
+        "negative_prompt": neg, "quantization": "disabled", "use_disk_cache": False, "device": "gpu"}}
+    g["sched"] = {"class_type": "WanVideoSchedulerv2", "inputs": {"scheduler": "longcat_distill_euler",
+        "steps": 12, "shift": 12, "start_step": 0, "end_step": -1, "enhance_hf": False}}
+
+    def _sampler(embeds_ref):
+        return {"class_type": "WanVideoSamplerv2", "inputs": {"model": ["model", 0], "image_embeds": embeds_ref,
+            "cfg": 1, "seed": 1, "force_offload": True, "scheduler": ["sched", 0], "text_embeds": ["text", 0],
+            "add_noise_to_samples": False}}
+
+    def _decode(samples_ref):
+        return {"class_type": "WanVideoDecode", "inputs": {"vae": ["vae", 0], "samples": samples_ref,
+            "normalization": "default", **_LC_VAE}}
+
+    g["s1_extend"] = {"class_type": "WanVideoLongCatAvatarExtendEmbeds", "inputs": {"prev_latents": ["enc_init", 0],
+        "audio_embeds": ["embeds", 0], "num_frames": _LC_WINDOW, "overlap": 1, "frames_processed": 0,
+        "if_not_enough_audio": "pad_with_start", "ref_frame_index": 10, "ref_mask_frame_range": 3}}
+    g["s1_sampler"] = _sampler(["s1_extend", 0])
+    g["s1_decode"] = _decode(["s1_sampler", 0])
+    g["s1_getsize"] = {"class_type": "GetImageSizeAndCount", "inputs": {"image": ["s1_decode", 0]}}
+    prev_sampler, prev_getsize = "s1_sampler", "s1_getsize"
+    final_images = ["s1_decode", 0]
+
+    for k in range(2, N + 1):
+        p = f"s{k}_"
+        g[p+"range"] = {"class_type": "GetImageRangeFromBatch", "inputs": {"images": [prev_getsize, 0],
+            "start_index": -1, "num_frames": _LC_OVERLAP}}
+        g[p+"encov"] = {"class_type": "WanVideoEncode", "inputs": {"vae": ["vae", 0], "image": [p+"range", 0],
+            "noise_aug_strength": 0, "latent_strength": 1, **_LC_VAE}}
+        g[p+"extend"] = {"class_type": "WanVideoLongCatAvatarExtendEmbeds", "inputs": {"prev_latents": [prev_sampler, 0],
+            "audio_embeds": ["embeds", 0], "ref_latent": ["enc_init", 0], "num_frames": _LC_WINDOW,
+            "overlap": _LC_OVERLAP, "frames_processed": [prev_getsize, 3], "if_not_enough_audio": "pad_with_start",
+            "ref_frame_index": 10, "ref_mask_frame_range": 3}}
+        g[p+"sampler"] = _sampler([p+"extend", 0])
+        g[p+"replace"] = {"class_type": "ReplaceVideoLatentFrames", "inputs": {"destination": [p+"sampler", 0],
+            "source": [p+"encov", 0], "index": 0}}
+        g[p+"decode"] = _decode([p+"replace", 0])
+        g[p+"batch"] = {"class_type": "ImageBatchExtendWithOverlap", "inputs": {"source_images": [prev_getsize, 0],
+            "new_images": [p+"decode", 0], "overlap": _LC_OVERLAP, "overlap_side": "new_images", "overlap_mode": "cut"}}
+        g[p+"getsize"] = {"class_type": "GetImageSizeAndCount", "inputs": {"image": [p+"batch", 2]}}
+        prev_sampler, prev_getsize = p+"sampler", p+"getsize"
+        final_images = [p+"batch", 2]
+
+    g["vhs"] = {"class_type": "VHS_VideoCombine", "inputs": {"images": final_images, "audio": ["embeds", 1],
+        "frame_rate": fps, "loop_count": 0, "filename_prefix": "LongCat", "format": "video/h264-mp4",
+        "pingpong": False, "save_output": True}}
+    print(f"worker-longcat - talking_avatar: {N} segmento(s), ~{total}f (~{total/fps:.1f}s) {w}x{h}")
+    return g, images
 
 
 def build_workflow_from_prompt(job_input):
