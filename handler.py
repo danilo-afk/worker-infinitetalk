@@ -885,11 +885,21 @@ def _build_ta_longcat(job_input, images, prompt):
     total = _round_4kp1(max(_LC_WINDOW, min(total or _LC_WINDOW, _TALKING_MAX_FRAMES)))
     window = _round_4kp1(max(_LC_WINDOW, min(int(job_input.get("lc_window") or _LC_WINDOW), 253)))
     N = _lc_segments(total, window)
-    blocks = int(job_input.get("blocks_to_swap") or 10)   # 48GB → baixo (skill)
-    quant = job_input.get("quantization") or "disabled"   # ex.: fp8_e4m3fn_scaled (Ada)
+    # DEFAULT = GGUF Q8 (19GB) → RESIDENTE no 48GB, block_swap=0 (sem ping-pong CPU↔GPU).
+    # bf16 (31.7GB) não cabia residente → forçava block_swap alto = ~6min/janela; Q8 ~1min.
+    # lc_model=bf16 volta ao safetensors bf16 (com block_swap).
+    lc_model = (job_input.get("lc_model") or "gguf").lower()
+    if lc_model == "bf16":
+        model_file, base_prec = "LongCat/LongCat-Avatar-15_bf16.safetensors", "bf16"
+        quant = job_input.get("quantization") or "disabled"   # ex.: fp8_e4m3fn_scaled (Ada)
+        blocks = int(job_input.get("blocks_to_swap") or 10)
+    else:
+        model_file, base_prec, quant = "LongCat/LongCat-Avatar-15_comfy-Q8_0.gguf", "fp16_fast", "disabled"
+        blocks = int(job_input.get("blocks_to_swap") or 0)    # Q8 residente em 48GB → 0
     compile_on = bool(job_input.get("compile"))            # OFF por padrão: compile é net-negativo p/ job único
     aspect = (job_input.get("aspect_ratio") or "9:16").strip()
-    # Curto = LongCat prioriza QUALIDADE → 720p (>480×832). 1 janela absorve o custo maior.
+    # LongCat prioriza QUALIDADE → default 720p (>480×832). Resolução é alavanca de velocidade
+    # (custo/step ~ pixels): baixar via width/height se precisar acelerar vídeo longo.
     w, h = {"9:16": (720, 1280), "16:9": (1280, 720), "1:1": (960, 960)}.get(aspect, (720, 1280))
     if job_input.get("width") and job_input.get("height"):
         w = (int(job_input["width"]) // 16) * 16
@@ -915,7 +925,7 @@ def _build_ta_longcat(job_input, images, prompt):
         "block_swap_debug": False}}
     g["lora"] = {"class_type": "WanVideoLoraSelect", "inputs": {"lora": "LongCat/LongCat-Avatar-15_dmd_distill_lora_rank128_bf16.safetensors",
         "strength": 0.9, "low_mem_load": False, "merge_loras": False}}
-    model_inputs = {"model": "LongCat/LongCat-Avatar-15_bf16.safetensors", "base_precision": "bf16",
+    model_inputs = {"model": model_file, "base_precision": base_prec,
         "quantization": quant, "load_device": "offload_device", "attention_mode": "sdpa",
         "block_swap_args": ["blockswap", 0], "lora": ["lora", 0]}
     if compile_on:
@@ -991,7 +1001,7 @@ def _build_ta_longcat(job_input, images, prompt):
         "frame_rate": fps, "loop_count": 0, "filename_prefix": "LongCat", "format": "video/h264-mp4",
         "pingpong": False, "save_output": True}}
     print(f"worker-longcat - talking_avatar: {N} janela(s) de {window}f, ~{total}f (~{total/fps:.1f}s) "
-          f"{w}x{h} steps={steps} compile={compile_on} blocks={blocks} quant={quant}")
+          f"{w}x{h} steps={steps} compile={compile_on} blocks={blocks} model={lc_model} quant={quant}")
     return g, images
 
 
@@ -1091,21 +1101,13 @@ def _build_ta_infinitetalk(job_input, images, prompt):
 
 
 def _build_talking_avatar(job_input, inj, images, prompt):
-    """Dispatcher do avatar falante — AUTO-SELEÇÃO POR DURAÇÃO:
-    - <10s (≤250 frames) → LongCat-1.5 (melhor qualidade E rápido: cabe em 1 janela do
-      nó ExtendEmbeds (max 256), sem chaining lento).
-    - ≥10s → InfiniteTalk (loop interno; LongCat precisaria encadear N janelas = lento).
-    Override explícito: `avatar_model` = longcat|infinitetalk."""
-    choice = (job_input.get("avatar_model") or "").lower()
-    if choice not in ("longcat", "infinitetalk"):
-        audio = job_input.get("audio")
-        if isinstance(audio, dict):
-            audio = [audio]
-        total = _ta_derive_total(job_input, audio, 25)
-        choice = "longcat" if total <= 250 else "infinitetalk"   # ~10s @ 25fps
-    if choice == "longcat":
-        return _build_ta_longcat(job_input, images, prompt)
-    return _build_ta_infinitetalk(job_input, images, prompt)
+    """Dispatcher do avatar falante — DEFAULT = LongCat-1.5 (modelo sucessor: Whisper,
+    8-step distill, GGUF Q8 residente = rápido em qualquer duração). Vídeo longo encadeia
+    janelas (ExtendEmbeds), mas o Q8 residente já mata o gargalo do block_swap.
+    Override explícito: `avatar_model=infinitetalk` (loop interno, fallback)."""
+    if (job_input.get("avatar_model") or "").lower() == "infinitetalk":
+        return _build_ta_infinitetalk(job_input, images, prompt)
+    return _build_ta_longcat(job_input, images, prompt)
 
 
 def build_workflow_from_prompt(job_input):

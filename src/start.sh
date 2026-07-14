@@ -299,6 +299,9 @@ PYHF
   mkdir -p "$DIFF/LongCat" "$VOLUME/models/loras/LongCat" "$VOLUME/models/audio_encoders"
   dl "$DIFF/LongCat/LongCat-Avatar-15_bf16.safetensors" 20000000000 \
      "$KJ/LongCat/LongCat-Avatar-15_bf16.safetensors" "LongCat-Avatar-15 bf16"
+  # GGUF Q8 (19GB) = DEFAULT: RESIDENTE no 48GB, block_swap=0 (bf16 31.7GB forçava offload = ~6min/janela; Q8 ~1min).
+  dl "$DIFF/LongCat/LongCat-Avatar-15_comfy-Q8_0.gguf" 18000000000 \
+     "https://huggingface.co/vantagewithai/LongCat-Video-Avatar-1.5-GGUF-ComfyUI/resolve/main/LongCat-Avatar-15_comfy-Q8_0.gguf" "LongCat-Avatar-15 Q8 GGUF"
   dl "$VOLUME/models/loras/LongCat/LongCat-Avatar-15_dmd_distill_lora_rank128_bf16.safetensors" 500000000 \
      "$KJ/LongCat/LongCat-Avatar-15_dmd_distill_lora_rank128_bf16.safetensors" "LongCat distill LoRA"
   # LongCat-1.5 usa WHISPER-large-v3 (não wav2vec2): audio proj espera 5*5*1280=32000
