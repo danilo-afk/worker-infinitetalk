@@ -573,10 +573,13 @@ _TEMPLATE_INJECT = {
     # (até 4) + 1 background; PromptRelayEncode conduz o prompt; dims em INTConstant.
     "msr": {"file": "ltx23_msr.json", "prompt_relay": "99", "subjects": ["29", "40"], "background": "30",
             "width": "43", "height": "44", "length": "50", "fps": 30},
-    # Talking-avatar (InfiniteTalk): imagem (retrato) + áudio (fala) -> vídeo falante.
-    # positive/negative usam o campo `positive_prompt`/`negative_prompt` (WanVideoTextEncodeCached).
-    "talking_avatar": {"file": "talking_avatar.json", "load_image": "1", "load_audio": "7",
-                       "positive": "14", "negative": "14", "length": "9", "fps": 25, "resize": "2"},
+    # Talking-avatar (LongCat-Avatar-1.5, "melhor versão" — Whisper 32000): imagem (retrato)
+    # + áudio (fala) -> vídeo falante. positive/negative = `positive_prompt`/`negative_prompt`
+    # (WanVideoTextEncodeCached). num_frames em DOIS nós: LongCatAvatarWhisperEmbeds (7) e
+    # WanVideoLongCatAvatarExtendEmbeds (12). Backup InfiniteTalk = talking_avatar_infinitetalk.json.
+    "talking_avatar": {"file": "talking_avatar.json", "load_image": "1", "load_audio": "5",
+                       "positive": "11", "negative": "11", "length": "7", "length2": "12",
+                       "fps": 25, "resize": "2"},
 }
 
 # Teto de frames do talking-avatar (24GB + block-swap; ~5s @ 25fps). InfiniteTalk faz
@@ -833,9 +836,12 @@ def _build_talking_avatar(job_input, inj, images, prompt):
         frames = int(job_input["num_frames"])
     elif job_input.get("duration") or job_input.get("duration_seconds"):
         frames = round(float(job_input.get("duration") or job_input.get("duration_seconds")) * fps)
-    if frames and inj["length"] in wf:
+    if frames:
         frames = max(25, min(frames, _TALKING_MAX_FRAMES))
-        wf[inj["length"]]["inputs"]["num_frames"] = frames
+        for _k in ("length", "length2"):
+            _nid = inj.get(_k)
+            if _nid and _nid in wf:
+                wf[_nid]["inputs"]["num_frames"] = frames
         print(f"worker-ltx-video - talking_avatar: num_frames={frames} (~{frames/fps:.1f}s @ {fps}fps)")
     # aspect_ratio -> dims do resize (default 832x480 no template).
     aspect = (job_input.get("aspect_ratio") or "").strip()
