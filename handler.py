@@ -1052,9 +1052,12 @@ def _build_ta_infinitetalk(job_input, images, prompt):
     g["blockswap"] = {"class_type": "WanVideoBlockSwap", "inputs": {"blocks_to_swap": blocks, "offload_img_emb": False,
         "offload_txt_emb": False, "use_non_blocking": True, "vace_blocks_to_swap": 0, "prefetch_blocks": 1,
         "block_swap_debug": False}}
+    # fp8_fast exige LoRA MESCLADA (senão "fp8_fast is not supported with unmerged LoRAs").
+    # GGUF NÃO suporta merge → só merge no fp8.
+    merge = quant.startswith("fp8")
     g["lora"] = {"class_type": "WanVideoLoraSelect", "inputs": {
         "lora": "WanVideo/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
-        "strength": 1, "low_mem_load": False, "merge_loras": False}}
+        "strength": 1, "low_mem_load": False, "merge_loras": merge}}
     g["model"] = {"class_type": "WanVideoModelLoader", "inputs": {"model": model_file,
         "base_precision": base_prec, "quantization": quant, "load_device": "offload_device",
         "attention_mode": "sdpa", "block_swap_args": ["blockswap", 0], "lora": ["lora", 0],
