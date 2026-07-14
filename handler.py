@@ -887,7 +887,7 @@ def _build_ta_longcat(job_input, images, prompt):
     N = _lc_segments(total, window)
     blocks = int(job_input.get("blocks_to_swap") or 10)   # 48GB → baixo (skill)
     quant = job_input.get("quantization") or "disabled"   # ex.: fp8_e4m3fn_scaled (Ada)
-    compile_on = not job_input.get("no_compile")           # torch.compile ligado por padrão
+    compile_on = bool(job_input.get("compile"))            # OFF por padrão: compile é net-negativo p/ job único
     aspect = (job_input.get("aspect_ratio") or "9:16").strip()
     # Resolução NATIVA do LongCat/Wan 480p. 9:16 retrato = melhor enquadramento p/ avatar.
     w, h = {"9:16": (480, 832), "16:9": (832, 480), "1:1": (640, 640)}.get(aspect, (480, 832))
@@ -1088,10 +1088,19 @@ def _build_ta_infinitetalk(job_input, images, prompt):
 
 
 def _build_talking_avatar(job_input, inj, images, prompt):
-    """Dispatcher do avatar falante. DEFAULT = InfiniteTalk (loop interno = rápido p/ vídeo
-    longo, como o kiara_new). `avatar_model=longcat` = LongCat-1.5 (melhor qualidade, mas
-    lento em vídeo longo por janelamento externo)."""
-    if (job_input.get("avatar_model") or "").lower() == "longcat":
+    """Dispatcher do avatar falante — AUTO-SELEÇÃO POR DURAÇÃO:
+    - <10s (≤250 frames) → LongCat-1.5 (melhor qualidade E rápido: cabe em 1 janela do
+      nó ExtendEmbeds (max 256), sem chaining lento).
+    - ≥10s → InfiniteTalk (loop interno; LongCat precisaria encadear N janelas = lento).
+    Override explícito: `avatar_model` = longcat|infinitetalk."""
+    choice = (job_input.get("avatar_model") or "").lower()
+    if choice not in ("longcat", "infinitetalk"):
+        audio = job_input.get("audio")
+        if isinstance(audio, dict):
+            audio = [audio]
+        total = _ta_derive_total(job_input, audio, 25)
+        choice = "longcat" if total <= 250 else "infinitetalk"   # ~10s @ 25fps
+    if choice == "longcat":
         return _build_ta_longcat(job_input, images, prompt)
     return _build_ta_infinitetalk(job_input, images, prompt)
 
