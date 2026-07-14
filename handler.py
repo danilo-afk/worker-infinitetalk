@@ -859,12 +859,12 @@ def _round_4kp1(n):
     return k * 4 + 1
 
 
-def _build_talking_avatar(job_input, inj, images, prompt):
+def _build_ta_longcat(job_input, images, prompt):
     """Talking-avatar (LongCat-Avatar-1.5): grafo MULTI-JANELA encadeado (padrão do example
     oficial). O nó ExtendEmbeds gera <=256 frames/janela → vídeo longo = encadear janelas
     (prev_latents + frames_processed cumulativo + ref_latent da face p/ consistência).
-    VELOCIDADE: torch.compile (compila os blocos 1x, amortiza nas janelas) + block_swap baixo.
-    Ajustável por /run: lc_window (93-256), blocks_to_swap, quantization, no_compile."""
+    MELHOR QUALIDADE por frame, mas LENTO p/ vídeo longo (N samplers). Ajustável por /run:
+    lc_window (93-256), blocks_to_swap, quantization, steps, no_compile."""
     image_name = images[0]["name"] if images else "example.png"
     audio = job_input.get("audio")
     if isinstance(audio, dict):
@@ -990,6 +990,94 @@ def _build_talking_avatar(job_input, inj, images, prompt):
     print(f"worker-longcat - talking_avatar: {N} janela(s) de {window}f, ~{total}f (~{total/fps:.1f}s) "
           f"{w}x{h} steps={steps} compile={compile_on} blocks={blocks} quant={quant}")
     return g, images
+
+
+def _ta_derive_total(job_input, audio, fps):
+    """Frames totais: num_frames > duration > áudio (deriva) > piso. Clamp ao teto."""
+    total = None
+    if job_input.get("num_frames"):
+        total = int(job_input["num_frames"])
+    elif job_input.get("duration") or job_input.get("duration_seconds"):
+        total = round(float(job_input.get("duration") or job_input.get("duration_seconds")) * fps)
+    elif audio:
+        secs = _audio_seconds(audio[0].get("audio"))
+        if secs:
+            total = round(secs * fps)
+    return max(_LC_WINDOW, min(total or _LC_WINDOW, _TALKING_MAX_FRAMES))
+
+
+def _build_ta_infinitetalk(job_input, images, prompt):
+    """Talking-avatar (InfiniteTalk): LOOP INTERNO. O nó WanVideoImageToVideoMultiTalk
+    (mode=infinitetalk, frame_window_size) gera o áudio INTEIRO num sampler só — vídeo longo
+    SEM janelamento externo (rápido, como o kiara_new). Modelo Q8 ~15GB cabe na VRAM 48GB.
+    Duração vem do áudio (num_frames no MultiTalkWav2VecEmbeds). Ajustável: blocks_to_swap, steps."""
+    image_name = images[0]["name"] if images else "example.png"
+    audio = job_input.get("audio")
+    if isinstance(audio, dict):
+        audio = [audio]
+    audio_name = audio[0]["name"] if audio else "audio.wav"
+    neg = job_input.get("negative_prompt") or _LC_NEG
+    fps = 25
+    total = _ta_derive_total(job_input, audio, fps)
+    blocks = int(job_input.get("blocks_to_swap") or 10)
+    steps = int(job_input.get("steps") or 6)          # Lightx2v distill = 6 steps
+    win = int(job_input.get("frame_window_size") or 81)
+    aspect = (job_input.get("aspect_ratio") or "9:16").strip()
+    w, h = {"9:16": (480, 832), "16:9": (832, 480), "1:1": (640, 640)}.get(aspect, (480, 832))
+
+    g = {}
+    g["img"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
+    g["resize"] = {"class_type": "ImageResizeKJv2", "inputs": {"image": ["img", 0], "width": w,
+        "height": h, "upscale_method": "lanczos", "keep_proportion": "crop", "pad_color": "0, 0, 0",
+        "crop_position": "center", "divisible_by": 16, "device": "cpu"}}
+    g["getsize"] = {"class_type": "GetImageSizeAndCount", "inputs": {"image": ["resize", 0]}}
+    g["vae"] = {"class_type": "WanVideoVAELoader", "inputs": {"model_name": "wanvideo/Wan2_1_VAE_bf16.safetensors",
+        "precision": "bf16", "use_cpu_cache": False, "verbose": False}}
+    g["aud"] = {"class_type": "LoadAudio", "inputs": {"audio": audio_name}}
+    g["wav2vec"] = {"class_type": "DownloadAndLoadWav2VecModel", "inputs": {
+        "model": "TencentGameMate/chinese-wav2vec2-base", "base_precision": "fp16", "load_device": "main_device"}}
+    g["embeds"] = {"class_type": "MultiTalkWav2VecEmbeds", "inputs": {"wav2vec_model": ["wav2vec", 0],
+        "audio_1": ["aud", 0], "normalize_loudness": True, "num_frames": total, "fps": fps,
+        "audio_scale": 1, "audio_cfg_scale": 1, "multi_audio_type": "para"}}
+    g["multitalk"] = {"class_type": "MultiTalkModelLoader", "inputs": {
+        "model": "WanVideo/InfiniteTalk/Wan2_1-InfiniteTalk_Single_fp16.safetensors"}}
+    g["blockswap"] = {"class_type": "WanVideoBlockSwap", "inputs": {"blocks_to_swap": blocks, "offload_img_emb": False,
+        "offload_txt_emb": False, "use_non_blocking": True, "vace_blocks_to_swap": 0, "prefetch_blocks": 1,
+        "block_swap_debug": False}}
+    g["lora"] = {"class_type": "WanVideoLoraSelect", "inputs": {
+        "lora": "WanVideo/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
+        "strength": 1, "low_mem_load": False, "merge_loras": False}}
+    g["model"] = {"class_type": "WanVideoModelLoader", "inputs": {"model": "WanVideo/wan2.1-i2v-14b-480p-Q8_0.gguf",
+        "base_precision": "fp16_fast", "quantization": "disabled", "load_device": "offload_device",
+        "attention_mode": "sdpa", "block_swap_args": ["blockswap", 0], "lora": ["lora", 0],
+        "multitalk_model": ["multitalk", 0]}}
+    g["text"] = {"class_type": "WanVideoTextEncodeCached", "inputs": {"model_name": "umt5-xxl-enc-bf16.safetensors",
+        "precision": "bf16", "positive_prompt": prompt or "a person talking, natural lip movement, cinematic",
+        "negative_prompt": neg, "quantization": "disabled", "use_disk_cache": False, "device": "gpu"}}
+    g["i2v"] = {"class_type": "WanVideoImageToVideoMultiTalk", "inputs": {"vae": ["vae", 0],
+        "start_image": ["getsize", 0], "width": ["getsize", 1], "height": ["getsize", 2],
+        "frame_window_size": win, "motion_frame": 9, "force_offload": False, "colormatch": "disabled",
+        "tiled_vae": False, "mode": "infinitetalk", "output_path": ""}}
+    g["sampler"] = {"class_type": "WanVideoSampler", "inputs": {"model": ["model", 0], "image_embeds": ["i2v", 0],
+        "text_embeds": ["text", 0], "multitalk_embeds": ["embeds", 0], "steps": steps, "cfg": 1, "shift": 11,
+        "seed": 2, "force_offload": True, "scheduler": "dpm++_sde", "riflex_freq_index": 0, "denoise_strength": 1,
+        "batched_cfg": False, "rope_function": "comfy", "start_step": 0, "end_step": -1, "add_noise_to_samples": True}}
+    g["pass"] = {"class_type": "WanVideoPassImagesFromSamples", "inputs": {"samples": ["sampler", 0]}}
+    g["vhs"] = {"class_type": "VHS_VideoCombine", "inputs": {"images": ["pass", 0], "audio": ["aud", 0],
+        "frame_rate": fps, "loop_count": 0, "filename_prefix": "InfiniteTalk", "format": "video/h264-mp4",
+        "pingpong": False, "save_output": True}}
+    print(f"worker-infinitetalk - talking_avatar (LOOP INTERNO): ~{total}f (~{total/fps:.1f}s) {w}x{h} "
+          f"win={win} steps={steps} blocks={blocks}")
+    return g, images
+
+
+def _build_talking_avatar(job_input, inj, images, prompt):
+    """Dispatcher do avatar falante. DEFAULT = InfiniteTalk (loop interno = rápido p/ vídeo
+    longo, como o kiara_new). `avatar_model=longcat` = LongCat-1.5 (melhor qualidade, mas
+    lento em vídeo longo por janelamento externo)."""
+    if (job_input.get("avatar_model") or "").lower() == "longcat":
+        return _build_ta_longcat(job_input, images, prompt)
+    return _build_ta_infinitetalk(job_input, images, prompt)
 
 
 def build_workflow_from_prompt(job_input):
