@@ -827,6 +827,32 @@ def _lc_segments(total):
     return math.ceil((total - _LC_WINDOW) / (_LC_WINDOW - _LC_OVERLAP)) + 1
 
 
+def _audio_seconds(data_uri):
+    """Duração (s) de um áudio base64/data-URI via ffprobe — pra derivar o comprimento
+    do vídeo do próprio áudio (o vídeo acompanha a fala). None se não der."""
+    if not data_uri or not isinstance(data_uri, str):
+        return None
+    b64 = data_uri.split(",", 1)[1] if "," in data_uri else data_uri
+    tmp = None
+    try:
+        raw = base64.b64decode(b64)
+        with tempfile.NamedTemporaryFile(suffix=".audio", delete=False) as f:
+            f.write(raw)
+            tmp = f.name
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", tmp],
+            capture_output=True, text=True, timeout=30)
+        secs = float((out.stdout or "").strip())
+        return secs if secs > 0 else None
+    except Exception as e:
+        print(f"worker-longcat - _audio_seconds falhou: {e}")
+        return None
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.remove(tmp)
+
+
 def _build_talking_avatar(job_input, inj, images, prompt):
     """Talking-avatar (LongCat-Avatar-1.5): monta um grafo N-segmentos ENCADEADO
     (vídeo longo) a partir de {imagem, áudio, prompt, duração}. Cada segmento adiciona
@@ -844,10 +870,17 @@ def _build_talking_avatar(job_input, inj, images, prompt):
         total = int(job_input["num_frames"])
     elif job_input.get("duration") or job_input.get("duration_seconds"):
         total = round(float(job_input.get("duration") or job_input.get("duration_seconds")) * fps)
+    elif audio:
+        # SEM duração pedida: deriva do PRÓPRIO ÁUDIO (vídeo acompanha a fala) → N segmentos.
+        secs = _audio_seconds(audio[0].get("audio"))
+        if secs:
+            total = round(secs * fps)
     total = max(_LC_WINDOW, min(total or _LC_WINDOW, _TALKING_MAX_FRAMES))
     N = _lc_segments(total)
     aspect = (job_input.get("aspect_ratio") or "9:16").strip()
-    w, h = _ASPECT_WH.get(aspect, (480, 832))
+    # Resolução NATIVA do LongCat/Wan 480p (não o _ASPECT_WH do LTX, que é 720x1280 e
+    # produz saída torta). 9:16 retrato = melhor enquadramento p/ avatar falante.
+    w, h = {"9:16": (480, 832), "16:9": (832, 480), "1:1": (640, 640)}.get(aspect, (480, 832))
 
     g = {}
     g["img"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
