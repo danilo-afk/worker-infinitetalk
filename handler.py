@@ -100,18 +100,16 @@ def _get_idle_timeout_for_node_class(node_class):
         return CHECKPOINT_NODE_IDLE_TIMEOUT_S
     if node_class == "SamplerCustomAdvanced":
         return SAMPLER_NODE_IDLE_TIMEOUT_S
-    # InfiniteTalk (WanVideoWrapper): sampler + loaders/encoders pesados (Q8 dequant,
-    # block-swap CPU<->GPU, wav2vec download) ficam longos sem eventos de websocket.
-    if node_class in (
-        "WanVideoSampler",
-        "WanVideoModelLoader",
+    # InfiniteTalk/LongCat (WanVideoWrapper): sampler + loaders/encoders pesados (dequant,
+    # block-swap CPU<->GPU, torch.compile no 1º forward, decode de vídeo longo) ficam
+    # MINUTOS sem eventos de websocket. Match por PREFIXO cobre os v2/extend/whisper/decode
+    # (ex.: WanVideoSamplerv2, WanVideoLongCatAvatarExtendEmbeds, LongCatAvatarWhisperEmbeds).
+    if node_class.startswith(("WanVideo", "LongCat")) or node_class in (
         "MultiTalkModelLoader",
         "DownloadAndLoadWav2VecModel",
         "Wav2VecModelLoader",
-        "WanVideoTextEncodeCached",
-        "WanVideoVAELoader",
-        "WanVideoImageToVideoMultiTalk",
         "MultiTalkWav2VecEmbeds",
+        "WhisperModelLoader",
     ):
         return SAMPLER_NODE_IDLE_TIMEOUT_S
     # LTX-2 usa LTXVSpatioTemporalTiledVAEDecode; LTX-2.3 usa LTXVTiledVAEDecode/LTXVAudioVAEDecode.
