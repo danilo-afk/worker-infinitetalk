@@ -13,4 +13,5 @@ runpod_worker_ltx_video:
   unet: models/unet/
   text_encoders: models/text_encoders/
   diffusion_models: models/diffusion_models/
+  audio_encoders: models/audio_encoders/
   LLM: models/LLM/
