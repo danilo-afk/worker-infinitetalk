@@ -1019,9 +1019,17 @@ def _build_ta_infinitetalk(job_input, images, prompt):
     neg = job_input.get("negative_prompt") or _LC_NEG
     fps = 25
     total = _ta_derive_total(job_input, audio, fps)
-    blocks = int(job_input.get("blocks_to_swap") or 10)
+    blocks = int(job_input.get("blocks_to_swap") or 0)   # Q8/fp8 ~15GB cabe em 48GB → 0 (sem offload)
     steps = int(job_input.get("steps") or 6)          # Lightx2v distill = 6 steps
     win = int(job_input.get("frame_window_size") or 81)
+    # DEFAULT = fp8 safetensors (sem dequant por step, ~3-4x + rápido que o Q8 GGUF).
+    # it_model=gguf → volta pro Q8 (fallback se fp8 não casar com o adapter InfiniteTalk).
+    if (job_input.get("it_model") or "fp8").lower() == "gguf":
+        model_file, base_prec, quant = "WanVideo/wan2.1-i2v-14b-480p-Q8_0.gguf", "fp16_fast", "disabled"
+    else:
+        model_file = "WanVideo/Wan2_1-I2V-14B-480P_fp8_e4m3fn.safetensors"
+        base_prec = "fp16_fast"
+        quant = job_input.get("quantization") or "fp8_e4m3fn_fast"   # matmul fp8 (Ada ≥8.9)
     aspect = (job_input.get("aspect_ratio") or "9:16").strip()
     w, h = {"9:16": (480, 832), "16:9": (832, 480), "1:1": (640, 640)}.get(aspect, (480, 832))
 
@@ -1047,8 +1055,8 @@ def _build_ta_infinitetalk(job_input, images, prompt):
     g["lora"] = {"class_type": "WanVideoLoraSelect", "inputs": {
         "lora": "WanVideo/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
         "strength": 1, "low_mem_load": False, "merge_loras": False}}
-    g["model"] = {"class_type": "WanVideoModelLoader", "inputs": {"model": "WanVideo/wan2.1-i2v-14b-480p-Q8_0.gguf",
-        "base_precision": "fp16_fast", "quantization": "disabled", "load_device": "offload_device",
+    g["model"] = {"class_type": "WanVideoModelLoader", "inputs": {"model": model_file,
+        "base_precision": base_prec, "quantization": quant, "load_device": "offload_device",
         "attention_mode": "sdpa", "block_swap_args": ["blockswap", 0], "lora": ["lora", 0],
         "multitalk_model": ["multitalk", 0]}}
     g["text"] = {"class_type": "WanVideoTextEncodeCached", "inputs": {"model_name": "umt5-xxl-enc-bf16.safetensors",
@@ -1067,7 +1075,7 @@ def _build_ta_infinitetalk(job_input, images, prompt):
         "frame_rate": fps, "loop_count": 0, "filename_prefix": "InfiniteTalk", "format": "video/h264-mp4",
         "pingpong": False, "save_output": True}}
     print(f"worker-infinitetalk - talking_avatar (LOOP INTERNO): ~{total}f (~{total/fps:.1f}s) {w}x{h} "
-          f"win={win} steps={steps} blocks={blocks}")
+          f"win={win} steps={steps} blocks={blocks} model={model_file.split('/')[-1]} quant={quant}")
     return g, images
 
 

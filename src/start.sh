@@ -273,6 +273,9 @@ PYHF
   # Modelo base Wan2.1-I2V-14B (Q8 GGUF, city96) + InfiniteTalk single (fp16, Kijai)
   dl "$DIFF/WanVideo/wan2.1-i2v-14b-480p-Q8_0.gguf" 8000000000 \
      "https://huggingface.co/city96/Wan2.1-I2V-14B-480P-gguf/resolve/main/wan2.1-i2v-14b-480p-Q8_0.gguf" "Wan2.1-I2V-14B Q8"
+  # fp8 safetensors (SEM dequant por step, ~3-4x mais rapido que o Q8 GGUF; default do InfiniteTalk)
+  dl "$DIFF/WanVideo/Wan2_1-I2V-14B-480P_fp8_e4m3fn.safetensors" 14000000000 \
+     "$KJ/Wan2_1-I2V-14B-480P_fp8_e4m3fn.safetensors" "Wan2.1-I2V-14B fp8_e4m3fn"
   dl "$DIFF/WanVideo/InfiniteTalk/Wan2_1-InfiniteTalk_Single_fp16.safetensors" 4000000000 \
      "$KJ/InfiniteTalk/Wan2_1-InfiniTetalk-Single_fp16.safetensors" "InfiniteTalk Single fp16"
   # Text encoder umt5-xxl + VAE + clip_vision + distill LoRA
