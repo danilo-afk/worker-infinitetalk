@@ -812,12 +812,21 @@ def _build_msr(job_input, inj, images, prompt):
     return wf, upload
 
 
-# --- LongCat-Avatar-1.5: builder de PASSAGEM ÚNICA (vídeo longo nativo) ---------------
-_LC_WINDOW = 93   # piso de frames (janela mínima do LongCat)
+# --- LongCat-Avatar-1.5: builder MULTI-JANELA encadeado (padrão do example oficial) ---
+# O nó ExtendEmbeds tem max 256 frames/janela → vídeo longo = encadear janelas. LongCat
+# NÃO tem loop interno (isso é do InfiniteTalk MultiTalk). Velocidade: torch.compile.
+_LC_WINDOW = 93   # frames/janela (valor do example oficial; ajustável até 256 por /run)
+_LC_OVERLAP = 13  # frames de sobreposição entre janelas (continuidade)
 _LC_NEG = ("bright tones, overexposed, static, blurred details, subtitles, worst quality, "
            "low quality, deformed, disfigured, extra fingers")
 _LC_VAE = {"enable_vae_tiling": False, "tile_x": 272, "tile_y": 272,
            "tile_stride_x": 144, "tile_stride_y": 128}
+
+
+def _lc_segments(total, window):
+    if total <= window:
+        return 1
+    return math.ceil((total - window) / (window - _LC_OVERLAP)) + 1
 
 
 def _audio_seconds(data_uri):
@@ -853,10 +862,11 @@ def _round_4kp1(n):
 
 
 def _build_talking_avatar(job_input, inj, images, prompt):
-    """Talking-avatar (LongCat-Avatar-1.5): grafo de PASSAGEM ÚNICA nativa. O LongCat é
-    feito p/ vídeo longo — gera o vídeo inteiro (30-60s) num único sampler, com a
-    extensão temporal INTERNA ao modelo. Sem segmentação/encadeamento no Python
-    (re-encodar por janela era o gargalo). Duração deriva do áudio. Retorna (grafo, images)."""
+    """Talking-avatar (LongCat-Avatar-1.5): grafo MULTI-JANELA encadeado (padrão do example
+    oficial). O nó ExtendEmbeds gera <=256 frames/janela → vídeo longo = encadear janelas
+    (prev_latents + frames_processed cumulativo + ref_latent da face p/ consistência).
+    VELOCIDADE: torch.compile (compila os blocos 1x, amortiza nas janelas) + block_swap baixo.
+    Ajustável por /run: lc_window (93-256), blocks_to_swap, quantization, no_compile."""
     image_name = images[0]["name"] if images else "example.png"
     audio = job_input.get("audio")
     if isinstance(audio, dict):
@@ -875,6 +885,11 @@ def _build_talking_avatar(job_input, inj, images, prompt):
         if secs:
             total = round(secs * fps)
     total = _round_4kp1(max(_LC_WINDOW, min(total or _LC_WINDOW, _TALKING_MAX_FRAMES)))
+    window = _round_4kp1(max(_LC_WINDOW, min(int(job_input.get("lc_window") or _LC_WINDOW), 253)))
+    N = _lc_segments(total, window)
+    blocks = int(job_input.get("blocks_to_swap") or 10)   # 48GB → baixo (skill)
+    quant = job_input.get("quantization") or "disabled"   # ex.: fp8_e4m3fn_scaled (Ada)
+    compile_on = not job_input.get("no_compile")           # torch.compile ligado por padrão
     aspect = (job_input.get("aspect_ratio") or "9:16").strip()
     # Resolução NATIVA do LongCat/Wan 480p. 9:16 retrato = melhor enquadramento p/ avatar.
     w, h = {"9:16": (480, 832), "16:9": (832, 480), "1:1": (640, 640)}.get(aspect, (480, 832))
@@ -894,35 +909,86 @@ def _build_talking_avatar(job_input, inj, images, prompt):
     g["embeds"] = {"class_type": "LongCatAvatarWhisperEmbeds", "inputs": {"whisper_model": ["whisper", 0],
         "audio_1": ["aud", 0], "normalize_loudness": True, "num_frames": total, "fps": fps,
         "audio_scale": 1, "audio_cfg_scale": 1, "multi_audio_type": "para"}}
-    # 48GB: block_swap baixo = modelo residente na VRAM = sampler rápido (skill: 10).
-    # Ajustável por /run p/ achar o ponto sem OOM de VRAM no latente longo, sem rebuild.
-    blocks = int(job_input.get("blocks_to_swap") or 10)
     g["blockswap"] = {"class_type": "WanVideoBlockSwap", "inputs": {"blocks_to_swap": blocks, "offload_img_emb": False,
         "offload_txt_emb": False, "use_non_blocking": False, "vace_blocks_to_swap": 0, "prefetch_blocks": 1,
         "block_swap_debug": False}}
     g["lora"] = {"class_type": "WanVideoLoraSelect", "inputs": {"lora": "LongCat/LongCat-Avatar-15_dmd_distill_lora_rank128_bf16.safetensors",
         "strength": 0.9, "low_mem_load": False, "merge_loras": False}}
-    g["model"] = {"class_type": "WanVideoModelLoader", "inputs": {"model": "LongCat/LongCat-Avatar-15_bf16.safetensors",
-        "base_precision": "bf16", "quantization": "disabled", "load_device": "offload_device",
-        "attention_mode": "sdpa", "block_swap_args": ["blockswap", 0], "lora": ["lora", 0]}}
+    model_inputs = {"model": "LongCat/LongCat-Avatar-15_bf16.safetensors", "base_precision": "bf16",
+        "quantization": quant, "load_device": "offload_device", "attention_mode": "sdpa",
+        "block_swap_args": ["blockswap", 0], "lora": ["lora", 0]}
+    if compile_on:
+        # torch.compile dos blocos do transformer (example oficial). Compila na 1ª janela,
+        # roda compilado nas seguintes → grande ganho no multi-janela.
+        g["compile"] = {"class_type": "WanVideoTorchCompileSettings", "inputs": {"backend": "inductor",
+            "fullgraph": True, "mode": "default", "dynamic": False, "dynamo_cache_size_limit": 64,
+            "compile_transformer_blocks_only": True, "dynamo_recompile_limit": 128,
+            "force_parameter_static_shapes": False, "allow_unmerged_lora_compile": False}}
+        model_inputs["compile_args"] = ["compile", 0]
+    g["model"] = {"class_type": "WanVideoModelLoader", "inputs": model_inputs}
     g["text"] = {"class_type": "WanVideoTextEncodeCached", "inputs": {"model_name": "umt5-xxl-enc-bf16.safetensors",
         "precision": "bf16", "positive_prompt": prompt or "a person talking, natural expression",
         "negative_prompt": neg, "quantization": "disabled", "use_disk_cache": False, "device": "gpu"}}
     g["sched"] = {"class_type": "WanVideoSchedulerv2", "inputs": {"scheduler": "longcat_distill_euler",
         "steps": 12, "shift": 12, "start_step": 0, "end_step": -1, "enhance_hf": False}}
-    # PASSAGEM ÚNICA: num_frames = total (o modelo estende internamente), 1 sampler, 1 decode.
-    g["extend"] = {"class_type": "WanVideoLongCatAvatarExtendEmbeds", "inputs": {"prev_latents": ["enc_init", 0],
-        "audio_embeds": ["embeds", 0], "num_frames": total, "overlap": 1, "frames_processed": 0,
+
+    def _sampler(embeds_ref):
+        return {"class_type": "WanVideoSamplerv2", "inputs": {"model": ["model", 0], "image_embeds": embeds_ref,
+            "cfg": 1, "seed": 1, "force_offload": True, "scheduler": ["sched", 0], "text_embeds": ["text", 0],
+            "add_noise_to_samples": False}}
+
+    def _decode(samples_ref):
+        return {"class_type": "WanVideoDecode", "inputs": {"vae": ["vae", 0], "samples": samples_ref,
+            "normalization": "default", **_LC_VAE}}
+
+    # Tamanhos de janela pré-calculados p/ fechar EXATO no total (sem estourar a última
+    # janela = sem sobra muda + sem compute desperdiçado). Janela 1: overlap=1 (da imagem);
+    # k≥2: overlap=13. new_frames = num_frames - overlap.
+    sizes = [min(window, total)]
+    covered = sizes[0]
+    while covered < total:
+        need = total - covered                      # novos frames ainda faltando
+        nf = min(window, need + _LC_OVERLAP)         # num_frames desta janela (novos + overlap)
+        nf = _round_4kp1(max(_LC_OVERLAP + 4, nf))
+        sizes.append(nf)
+        covered += nf - _LC_OVERLAP
+    N = len(sizes)
+
+    # Janela 1: começa da imagem inicial (enc_init).
+    g["s1_extend"] = {"class_type": "WanVideoLongCatAvatarExtendEmbeds", "inputs": {"prev_latents": ["enc_init", 0],
+        "audio_embeds": ["embeds", 0], "num_frames": sizes[0], "overlap": 1, "frames_processed": 0,
         "if_not_enough_audio": "pad_with_start", "ref_frame_index": 10, "ref_mask_frame_range": 3}}
-    g["sampler"] = {"class_type": "WanVideoSamplerv2", "inputs": {"model": ["model", 0], "image_embeds": ["extend", 0],
-        "cfg": 1, "seed": 1, "force_offload": True, "scheduler": ["sched", 0], "text_embeds": ["text", 0],
-        "add_noise_to_samples": False}}
-    g["decode"] = {"class_type": "WanVideoDecode", "inputs": {"vae": ["vae", 0], "samples": ["sampler", 0],
-        "normalization": "default", **_LC_VAE}}
-    g["vhs"] = {"class_type": "VHS_VideoCombine", "inputs": {"images": ["decode", 0], "audio": ["embeds", 1],
+    g["s1_sampler"] = _sampler(["s1_extend", 0])
+    g["s1_decode"] = _decode(["s1_sampler", 0])
+    g["s1_getsize"] = {"class_type": "GetImageSizeAndCount", "inputs": {"image": ["s1_decode", 0]}}
+    prev_sampler, prev_getsize = "s1_sampler", "s1_getsize"
+    final_images = ["s1_decode", 0]
+
+    for k in range(2, N + 1):
+        p = f"s{k}_"
+        g[p+"range"] = {"class_type": "GetImageRangeFromBatch", "inputs": {"images": [prev_getsize, 0],
+            "start_index": -1, "num_frames": _LC_OVERLAP}}
+        g[p+"encov"] = {"class_type": "WanVideoEncode", "inputs": {"vae": ["vae", 0], "image": [p+"range", 0],
+            "noise_aug_strength": 0, "latent_strength": 1, **_LC_VAE}}
+        g[p+"extend"] = {"class_type": "WanVideoLongCatAvatarExtendEmbeds", "inputs": {"prev_latents": [prev_sampler, 0],
+            "audio_embeds": ["embeds", 0], "ref_latent": ["enc_init", 0], "num_frames": sizes[k-1],
+            "overlap": _LC_OVERLAP, "frames_processed": [prev_getsize, 3], "if_not_enough_audio": "pad_with_start",
+            "ref_frame_index": 10, "ref_mask_frame_range": 3}}
+        g[p+"sampler"] = _sampler([p+"extend", 0])
+        g[p+"replace"] = {"class_type": "ReplaceVideoLatentFrames", "inputs": {"destination": [p+"sampler", 0],
+            "source": [p+"encov", 0], "index": 0}}
+        g[p+"decode"] = _decode([p+"replace", 0])
+        g[p+"batch"] = {"class_type": "ImageBatchExtendWithOverlap", "inputs": {"source_images": [prev_getsize, 0],
+            "new_images": [p+"decode", 0], "overlap": _LC_OVERLAP, "overlap_side": "new_images", "overlap_mode": "cut"}}
+        g[p+"getsize"] = {"class_type": "GetImageSizeAndCount", "inputs": {"image": [p+"batch", 2]}}
+        prev_sampler, prev_getsize = p+"sampler", p+"getsize"
+        final_images = [p+"batch", 2]
+
+    g["vhs"] = {"class_type": "VHS_VideoCombine", "inputs": {"images": final_images, "audio": ["embeds", 1],
         "frame_rate": fps, "loop_count": 0, "filename_prefix": "LongCat", "format": "video/h264-mp4",
         "pingpong": False, "save_output": True}}
-    print(f"worker-longcat - talking_avatar SINGLE-PASS: {total}f (~{total/fps:.1f}s) {w}x{h}")
+    print(f"worker-longcat - talking_avatar: {N} janela(s) de {window}f, ~{total}f (~{total/fps:.1f}s) "
+          f"{w}x{h} compile={compile_on} blocks={blocks} quant={quant}")
     return g, images
 
 
