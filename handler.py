@@ -927,8 +927,10 @@ def _build_talking_avatar(job_input, inj, images, prompt):
     g["text"] = {"class_type": "WanVideoTextEncodeCached", "inputs": {"model_name": "umt5-xxl-enc-bf16.safetensors",
         "precision": "bf16", "positive_prompt": prompt or "a person talking, natural expression",
         "negative_prompt": neg, "quantization": "disabled", "use_disk_cache": False, "device": "gpu"}}
+    # v1.5 é distilada p/ 8 steps (MeiGen: "accelerates inference to 8 steps"). -33% vs 12.
+    steps = int(job_input.get("steps") or 8)
     g["sched"] = {"class_type": "WanVideoSchedulerv2", "inputs": {"scheduler": "longcat_distill_euler",
-        "steps": 12, "shift": 12, "start_step": 0, "end_step": -1, "enhance_hf": False}}
+        "steps": steps, "shift": 12, "start_step": 0, "end_step": -1, "enhance_hf": False}}
 
     def _sampler(embeds_ref):
         return {"class_type": "WanVideoSamplerv2", "inputs": {"model": ["model", 0], "image_embeds": embeds_ref,
@@ -986,7 +988,7 @@ def _build_talking_avatar(job_input, inj, images, prompt):
         "frame_rate": fps, "loop_count": 0, "filename_prefix": "LongCat", "format": "video/h264-mp4",
         "pingpong": False, "save_output": True}}
     print(f"worker-longcat - talking_avatar: {N} janela(s) de {window}f, ~{total}f (~{total/fps:.1f}s) "
-          f"{w}x{h} compile={compile_on} blocks={blocks} quant={quant}")
+          f"{w}x{h} steps={steps} compile={compile_on} blocks={blocks} quant={quant}")
     return g, images
 
 
