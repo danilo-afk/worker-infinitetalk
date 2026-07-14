@@ -290,6 +290,15 @@ PYHF
   dl "$VOLUME/models/MelBandRoFormer/MelBandRoformer_fp16.safetensors" 100000000 \
      "$KJ/MelBandRoformer_fp16.safetensors" "MelBandRoformer"
 
+  # ===== LongCat-Video-Avatar-1.5 (melhor versão do InfiniteTalk; Whisper/8-step distill) =====
+  # Modelo bf16 (31.7GB, cabe em 48GB VRAM) + distill LoRA. Nós: WanVideoLongCatAvatarExtendEmbeds
+  # + WanVideoSamplerv2/Schedulerv2 (longcat_distill_euler). VAE/umt5/wav2vec já baixados acima.
+  mkdir -p "$DIFF/LongCat" "$VOLUME/models/loras/LongCat"
+  dl "$DIFF/LongCat/LongCat-Avatar-15_bf16.safetensors" 20000000000 \
+     "$KJ/LongCat/LongCat-Avatar-15_bf16.safetensors" "LongCat-Avatar-15 bf16"
+  dl "$VOLUME/models/loras/LongCat/LongCat-Avatar-15_dmd_distill_lora_rank128_bf16.safetensors" 500000000 \
+     "$KJ/LongCat/LongCat-Avatar-15_dmd_distill_lora_rank128_bf16.safetensors" "LongCat distill LoRA"
+
   echo "worker-infinitetalk: Modelos prontos no volume!"
 else
   echo "worker-ltx-video: Sem network volume, usando modelos do container"
