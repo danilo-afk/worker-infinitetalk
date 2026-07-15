@@ -896,9 +896,10 @@ def _build_ta_longcat(job_input, images, prompt):
     elif lc_model == "gguf":
         model_file, base_prec, quant = "LongCat/LongCat-Avatar-15_comfy-Q8_0.gguf", "fp16_fast", "disabled"
         blocks = int(job_input.get("blocks_to_swap") or 0)
-    else:  # fp8 (default)
+    else:  # fp8 (opt-in p/ LongCat)
         model_file, base_prec = "LongCat/LongCat-Avatar-15_bf16.safetensors", "fp16_fast"
-        quant = job_input.get("quantization") or "fp8_e4m3fn_scaled"   # scaled roda em Ampere+Ada
+        # fp8_e4m3fn (NÃO _scaled): _scaled exige arquivo pré-escalado; on-the-fly do bf16 usa o simples.
+        quant = job_input.get("quantization") or "fp8_e4m3fn"
         blocks = int(job_input.get("blocks_to_swap") or 0)    # fp8 ~16GB residente em 48GB → 0
     compile_on = bool(job_input.get("compile"))            # OFF por padrão: compile é net-negativo p/ job único
     aspect = (job_input.get("aspect_ratio") or "9:16").strip()
@@ -1105,13 +1106,12 @@ def _build_ta_infinitetalk(job_input, images, prompt):
 
 
 def _build_talking_avatar(job_input, inj, images, prompt):
-    """Dispatcher do avatar falante — DEFAULT = LongCat-1.5 (modelo sucessor: Whisper,
-    8-step distill, GGUF Q8 residente = rápido em qualquer duração). Vídeo longo encadeia
-    janelas (ExtendEmbeds), mas o Q8 residente já mata o gargalo do block_swap.
-    Override explícito: `avatar_model=infinitetalk` (loop interno, fallback)."""
-    if (job_input.get("avatar_model") or "").lower() == "infinitetalk":
-        return _build_ta_infinitetalk(job_input, images, prompt)
-    return _build_ta_longcat(job_input, images, prompt)
+    """Dispatcher do avatar falante — DEFAULT = InfiniteTalk (VALIDADO por artefato: lip-sync
+    real, ~5.8min, loop interno single-pass). O LongCat-1.5 no wrapper ComfyUI gera frame 0 ok
+    e resto PRETO (bug de correção não resolvido) → fica como opt-in `avatar_model=longcat`."""
+    if (job_input.get("avatar_model") or "").lower() == "longcat":
+        return _build_ta_longcat(job_input, images, prompt)
+    return _build_ta_infinitetalk(job_input, images, prompt)
 
 
 def build_workflow_from_prompt(job_input):
