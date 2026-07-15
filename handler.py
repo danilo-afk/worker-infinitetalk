@@ -885,22 +885,26 @@ def _build_ta_longcat(job_input, images, prompt):
     total = _round_4kp1(max(_LC_WINDOW, min(total or _LC_WINDOW, _TALKING_MAX_FRAMES)))
     window = _round_4kp1(max(_LC_WINDOW, min(int(job_input.get("lc_window") or _LC_WINDOW), 253)))
     N = _lc_segments(total, window)
-    # DEFAULT = GGUF Q8 (19GB) → RESIDENTE no 48GB, block_swap=0 (sem ping-pong CPU↔GPU).
-    # bf16 (31.7GB) não cabia residente → forçava block_swap alto = ~6min/janela; Q8 ~1min.
-    # lc_model=bf16 volta ao safetensors bf16 (com block_swap).
-    lc_model = (job_input.get("lc_model") or "gguf").lower()
+    # DEFAULT = fp8 on-the-fly (fp8_e4m3fn_scaled) a partir do bf16 → ~16GB RESIDENTE no 48GB,
+    # block_swap=0, SEM dequant por step. Lição do runbook: p/ Wan, fp8 é ~3-4x + rápido que Q8
+    # GGUF (GGUF faz k-quant dequant a cada step). O bf16 já está no volume (sem novo download).
+    # lc_model=gguf (Q8, mais lento) e lc_model=bf16 (com block_swap) ficam como opções.
+    lc_model = (job_input.get("lc_model") or "fp8").lower()
     if lc_model == "bf16":
-        model_file, base_prec = "LongCat/LongCat-Avatar-15_bf16.safetensors", "bf16"
-        quant = job_input.get("quantization") or "disabled"   # ex.: fp8_e4m3fn_scaled (Ada)
+        model_file, base_prec, quant = "LongCat/LongCat-Avatar-15_bf16.safetensors", "bf16", "disabled"
         blocks = int(job_input.get("blocks_to_swap") or 10)
-    else:
+    elif lc_model == "gguf":
         model_file, base_prec, quant = "LongCat/LongCat-Avatar-15_comfy-Q8_0.gguf", "fp16_fast", "disabled"
-        blocks = int(job_input.get("blocks_to_swap") or 0)    # Q8 residente em 48GB → 0
+        blocks = int(job_input.get("blocks_to_swap") or 0)
+    else:  # fp8 (default)
+        model_file, base_prec = "LongCat/LongCat-Avatar-15_bf16.safetensors", "fp16_fast"
+        quant = job_input.get("quantization") or "fp8_e4m3fn_scaled"   # scaled roda em Ampere+Ada
+        blocks = int(job_input.get("blocks_to_swap") or 0)    # fp8 ~16GB residente em 48GB → 0
     compile_on = bool(job_input.get("compile"))            # OFF por padrão: compile é net-negativo p/ job único
     aspect = (job_input.get("aspect_ratio") or "9:16").strip()
-    # LongCat prioriza QUALIDADE → default 720p (>480×832). Resolução é alavanca de velocidade
-    # (custo/step ~ pixels): baixar via width/height se precisar acelerar vídeo longo.
-    w, h = {"9:16": (720, 1280), "16:9": (1280, 720), "1:1": (960, 960)}.get(aspect, (720, 1280))
+    # DEFAULT = 480×832 (sweet spot do LongCat/Wan; benchmark 4090 = ~60s/janela a 480p). 720p
+    # tem 2.3x os pixels (custo/step ~ pixels) → opt-in via width/height quando qualidade > tempo.
+    w, h = {"9:16": (480, 832), "16:9": (832, 480), "1:1": (640, 640)}.get(aspect, (480, 832))
     if job_input.get("width") and job_input.get("height"):
         w = (int(job_input["width"]) // 16) * 16
         h = (int(job_input["height"]) // 16) * 16
