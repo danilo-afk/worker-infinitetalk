@@ -885,22 +885,23 @@ def _build_ta_longcat(job_input, images, prompt):
     total = _round_4kp1(max(_LC_WINDOW, min(total or _LC_WINDOW, _TALKING_MAX_FRAMES)))
     window = _round_4kp1(max(_LC_WINDOW, min(int(job_input.get("lc_window") or _LC_WINDOW), 253)))
     N = _lc_segments(total, window)
-    # DEFAULT = fp8 on-the-fly (fp8_e4m3fn_scaled) a partir do bf16 → ~16GB RESIDENTE no 48GB,
-    # block_swap=0, SEM dequant por step. Lição do runbook: p/ Wan, fp8 é ~3-4x + rápido que Q8
-    # GGUF (GGUF faz k-quant dequant a cada step). O bf16 já está no volume (sem novo download).
-    # lc_model=gguf (Q8, mais lento) e lc_model=bf16 (com block_swap) ficam como opções.
-    lc_model = (job_input.get("lc_model") or "fp8").lower()
-    if lc_model == "bf16":
-        model_file, base_prec, quant = "LongCat/LongCat-Avatar-15_bf16.safetensors", "bf16", "disabled"
-        blocks = int(job_input.get("blocks_to_swap") or 10)
-    elif lc_model == "gguf":
+    # DEFAULT = bf16 puro (VALIDADO por grid: lip-sync real). 🔴 QUANTIZAÇÃO QUEBRA O LONGCAT:
+    # fp8_e4m3fn/GGUF Q8/base_precision fp16_fast corrompem o audio_proj/dtype → frames PRETOS
+    # (issues #1876/#1841/#1622). A lição "fp8>GGUF" do InfiniteTalk NÃO vale aqui — LongCat só bf16.
+    # bf16 (31.7GB) cabe no 48GB; block_swap=0 tenta residente (cai p/ swap se faltar VRAM). fp8/gguf
+    # ficam opt-in SÓ p/ debug (produzem preto hoje).
+    lc_model = (job_input.get("lc_model") or "bf16").lower()
+    if lc_model == "gguf":
         model_file, base_prec, quant = "LongCat/LongCat-Avatar-15_comfy-Q8_0.gguf", "fp16_fast", "disabled"
         blocks = int(job_input.get("blocks_to_swap") or 0)
-    else:  # fp8 (opt-in p/ LongCat)
+    elif lc_model == "fp8":
         model_file, base_prec = "LongCat/LongCat-Avatar-15_bf16.safetensors", "fp16_fast"
-        # fp8_e4m3fn (NÃO _scaled): _scaled exige arquivo pré-escalado; on-the-fly do bf16 usa o simples.
         quant = job_input.get("quantization") or "fp8_e4m3fn"
-        blocks = int(job_input.get("blocks_to_swap") or 0)    # fp8 ~16GB residente em 48GB → 0
+        blocks = int(job_input.get("blocks_to_swap") or 0)
+    else:  # bf16 (default, ÚNICO que funciona)
+        model_file, base_prec, quant = "LongCat/LongCat-Avatar-15_bf16.safetensors", "bf16", "disabled"
+        _bs = job_input.get("blocks_to_swap")   # default 10 (PROVADO ~8.5min@480p); 0=residente (testar OOM)
+        blocks = 10 if _bs is None else int(_bs)
     compile_on = bool(job_input.get("compile"))            # OFF por padrão: compile é net-negativo p/ job único
     aspect = (job_input.get("aspect_ratio") or "9:16").strip()
     # DEFAULT = 480×832 (sweet spot do LongCat/Wan; benchmark 4090 = ~60s/janela a 480p). 720p
@@ -1106,12 +1107,12 @@ def _build_ta_infinitetalk(job_input, images, prompt):
 
 
 def _build_talking_avatar(job_input, inj, images, prompt):
-    """Dispatcher do avatar falante — DEFAULT = InfiniteTalk (VALIDADO por artefato: lip-sync
-    real, ~5.8min, loop interno single-pass). O LongCat-1.5 no wrapper ComfyUI gera frame 0 ok
-    e resto PRETO (bug de correção não resolvido) → fica como opt-in `avatar_model=longcat`."""
-    if (job_input.get("avatar_model") or "").lower() == "longcat":
-        return _build_ta_longcat(job_input, images, prompt)
-    return _build_ta_infinitetalk(job_input, images, prompt)
+    """Dispatcher do avatar falante — DEFAULT = LongCat-1.5 bf16 (sucessor MeiGen: Whisper,
+    melhor lip-sync; VALIDADO por grid com bf16 — quantização quebra, ver _build_ta_longcat).
+    `avatar_model=infinitetalk` = fallback mais rápido (~5.8min, loop interno, tb validado)."""
+    if (job_input.get("avatar_model") or "").lower() == "infinitetalk":
+        return _build_ta_infinitetalk(job_input, images, prompt)
+    return _build_ta_longcat(job_input, images, prompt)
 
 
 def build_workflow_from_prompt(job_input):
